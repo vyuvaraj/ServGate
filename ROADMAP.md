@@ -46,13 +46,13 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 
 ---
 
-## Phase 6: Traffic Replay & Developer Tooling
-- [ ] **Traffic Replay & Validation**: Implement a dry-run utility (`servgate replay`) to replay production traffic logs against new middleware versions before deployment.
-- [ ] **One-Command Middleware Marketplace**: Install public or private WASM modules via `servgate install <name>` (resolving from `ServRegistry`).
-- [ ] **Native Serv Language Compilation**: Direct compiler toolchain support in `Serv-lang` to build middleware (`serv build --target wasm`).
+## Phase 6: Traffic Replay & Developer Tooling (Completed)
+- [x] **Traffic Replay & Validation**: Implement a dry-run utility (`servgate replay`) to replay production traffic logs against new middleware versions before deployment.
+- [x] **One-Command Middleware Marketplace**: Install public or private WASM modules via `servgate install <name>` (resolving from `ServRegistry`).
+- [x] **Native Serv Language Compilation**: Direct compiler toolchain support in `Serv-lang` to build middleware (`serv build --target wasm`).
 
 ---
 
 ## Phase 7: Advanced Policies & AI Capabilities
-- [ ] **AI-Native Gateway Features**: Built-in semantic caching, prompt guard, and PII redaction middlewares.
+- [x] **AI-Native Gateway Features**: Built-in semantic caching, prompt guard, and PII redaction middlewares.
 - [ ] **Policy as Code**: Support compiling human-readable access policies directly to executable WASM policies.

@@ -26,6 +26,9 @@ type Route struct {
 	Middleware         string   `json:"middleware,omitempty"`          // Request Middleware
 	ResponseMiddleware string   `json:"response_middleware,omitempty"` // Response Middleware
 	RateLimitRPM       int      `json:"rate_limit_rpm,omitempty"`      // Requests Per Minute Limit
+	PromptGuard        bool     `json:"prompt_guard,omitempty"`        // AI Prompt Guard
+	PiiRedact          bool     `json:"pii_redact,omitempty"`          // AI PII Redaction
+	SemanticCache      bool     `json:"semantic_cache,omitempty"`      // AI Semantic Cache
 }
 
 type rateLimiter struct {
@@ -34,24 +37,32 @@ type rateLimiter struct {
 }
 
 type GatewayHandler struct {
-	routes       []Route
-	wasm         *wasm.MiddlewareManager
-	authToken    string
-	rateLimiters map[string]*rateLimiter // key: clientIP + routePrefix
-	limiterMu    sync.Mutex
-	rrIndices    map[string]int          // route prefix -> current index
-	activeConns  map[string]int          // target URL -> active conn count
-	balancerMu   sync.Mutex
+	routes         []Route
+	wasm           *wasm.MiddlewareManager
+	authToken      string
+	rateLimiters   map[string]*rateLimiter   // key: clientIP + routePrefix
+	limiterMu      sync.Mutex
+	rrIndices      map[string]int            // route prefix -> current index
+	activeConns    map[string]int            // target URL -> active conn count
+	balancerMu     sync.Mutex
+	semanticCaches map[string]*SemanticCache // route prefix -> cache
 }
 
 func NewGatewayHandler(routes []Route, wasm *wasm.MiddlewareManager, authToken string) *GatewayHandler {
+	semanticCaches := make(map[string]*SemanticCache)
+	for _, route := range routes {
+		if route.SemanticCache {
+			semanticCaches[route.Prefix] = NewSemanticCache(0.85)
+		}
+	}
 	return &GatewayHandler{
-		routes:       routes,
-		wasm:         wasm,
-		authToken:    authToken,
-		rateLimiters: make(map[string]*rateLimiter),
-		rrIndices:    make(map[string]int),
-		activeConns:  make(map[string]int),
+		routes:         routes,
+		wasm:           wasm,
+		authToken:      authToken,
+		rateLimiters:   make(map[string]*rateLimiter),
+		rrIndices:      make(map[string]int),
+		activeConns:    make(map[string]int),
+		semanticCaches: semanticCaches,
 	}
 }
 
@@ -171,6 +182,52 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("traceparent", traceparent)
 	}
 
+	// Read request body to apply AI checks
+	var reqBody []byte
+	if matchedRoute.PromptGuard || matchedRoute.PiiRedact || matchedRoute.SemanticCache {
+		reqBody, _ = io.ReadAll(r.Body)
+		r.Body.Close()
+
+		prompt := extractPrompt(reqBody)
+
+		// 1. AI Prompt Guard
+		if matchedRoute.PromptGuard && prompt != "" {
+			if IsPromptInjection(prompt) {
+				otel.EndSpan(span, fmt.Errorf("AI Prompt Guard: Injection attempt blocked"), map[string]interface{}{})
+				http.Error(w, "AI Prompt Guard: Validation failed due to safety policy violation", http.StatusBadRequest)
+				return
+			}
+		}
+
+		// 2. AI PII Redactor
+		if matchedRoute.PiiRedact {
+			redactedText := RedactPii(string(reqBody))
+			reqBody = []byte(redactedText)
+			prompt = extractPrompt(reqBody) // re-extract redacted prompt
+		}
+
+		// 3. AI Semantic Cache (Lookup)
+		if matchedRoute.SemanticCache && prompt != "" {
+			if cache, ok := h.semanticCaches[matchedRoute.Prefix]; ok {
+				if cachedResp, hit := cache.Get(prompt); hit {
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("X-Cache", "HIT-SEMANTIC")
+					w.WriteHeader(http.StatusOK)
+					w.Write(cachedResp)
+					otel.EndSpan(span, nil, map[string]interface{}{
+						"http.route": matchedRoute.Prefix,
+						"cache.hit":  true,
+					})
+					return
+				}
+			}
+		}
+
+		// Restore request body for subsequent handlers
+		r.Body = io.NopCloser(bytes.NewReader(reqBody))
+		r.ContentLength = int64(len(reqBody))
+	}
+
 	// WASM Request Middleware execution if registered
 	if matchedRoute.Middleware != "" {
 		bodyBytes, _ := io.ReadAll(r.Body)
@@ -284,6 +341,16 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			binary.BigEndian.PutUint32(header[1:], uint32(len(bodyBytes)))
 			bodyBytes = append(header, bodyBytes...)
 			resp.Header.Set("Content-Type", "application/grpc+json")
+		}
+
+		// Cache response semantically
+		if matchedRoute.SemanticCache {
+			prompt := extractPrompt(reqBody)
+			if prompt != "" {
+				if cache, ok := h.semanticCaches[matchedRoute.Prefix]; ok {
+					cache.Set(prompt, bodyBytes)
+				}
+			}
 		}
 
 		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
