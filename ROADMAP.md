@@ -28,9 +28,9 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 ---
 
 ## Phase 4: Production Security & Resilience
-- [ ] **Native TLS/HTTPS Termination**: Serve API gateway endpoints over secure TLS sockets.
-- [ ] **Distributed Rate Limiting**: Limit client requests using sliding-window rate limit counters backed by Redis.
-- [ ] **Circuit Breakers & Retries**: Automatically fail fast or retry backend connections when targets exhibit high latency or error counts.
+- [x] **Native TLS/HTTPS Termination**: Serve API gateway endpoints over secure TLS sockets.
+- [x] **Rate Limiting**: Limit client requests using sliding-window rate limit counters.
+- [x] **Circuit Breakers & Retries**: Automatically fail fast or retry backend connections when targets exhibit high latency or error counts.
 
 ---
 

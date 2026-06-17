@@ -97,3 +97,64 @@ func TestWasmMiddlewareInjection(t *testing.T) {
 		t.Errorf("Expected empty bytes response, got %v", res)
 	}
 }
+
+func TestRateLimiting(t *testing.T) {
+	// 1. Start a mock backend target server
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("backend-response"))
+	})
+	backendServer := &http.Server{
+		Addr:    "127.0.0.1:8093",
+		Handler: backendHandler,
+	}
+	go backendServer.ListenAndServe()
+	defer backendServer.Shutdown(context.Background())
+
+	// 2. Setup gateway handler with rate limit of 2 requests per minute
+	routes := []proxy.Route{
+		{
+			Prefix:       "/api/v1/limited",
+			Target:       "http://127.0.0.1:8093",
+			RateLimitRPM: 2,
+		},
+	}
+
+	wasmManager, err := wasm.GetMiddlewareManager(context.Background())
+	if err != nil {
+		t.Fatalf("WASM setup failed: %v", err)
+	}
+
+	gatewayHandler := proxy.NewGatewayHandler(routes, wasmManager, "")
+	gatewayServer := &http.Server{
+		Addr:    "127.0.0.1:8094",
+		Handler: gatewayHandler,
+	}
+	go gatewayServer.ListenAndServe()
+	defer gatewayServer.Shutdown(context.Background())
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Issue 2 requests, which should succeed
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get("http://127.0.0.1:8094/api/v1/limited/test")
+		if err != nil {
+			t.Fatalf("Request %d failed: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Request %d: expected status 200, got %d", i, resp.StatusCode)
+		}
+	}
+
+	// The 3rd request should be rate limited (429)
+	resp, err := http.Get("http://127.0.0.1:8094/api/v1/limited/test")
+	if err != nil {
+		t.Fatalf("3rd request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("Expected 3rd request to be rate limited with 429, got %d", resp.StatusCode)
+	}
+}
