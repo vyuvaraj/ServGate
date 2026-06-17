@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -293,5 +294,40 @@ func TestDirectMemoryPassingAndResponseFilters(t *testing.T) {
 	expected := "cbdlfoe;jgnnq/ycuo"
 	if string(body) != expected {
 		t.Errorf("Expected body %q, got %q", expected, string(body))
+	}
+}
+
+func TestInstallCommand(t *testing.T) {
+	mockWasmContent := []byte("wasm-binary-content")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/middlewares/auth-token.wasm" {
+			w.WriteHeader(http.StatusOK)
+			w.Write(mockWasmContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{"servgate", "install", "auth-token"}
+
+	os.Setenv("SERV_REGISTRY", ts.URL)
+	defer os.Unsetenv("SERV_REGISTRY")
+
+	destPath := filepath.Join("middlewares", "auth-token.wasm")
+	os.Remove(destPath)
+	defer os.Remove(destPath)
+
+	runInstallCommand()
+
+	data, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("Failed to read installed middleware: %v", err)
+	}
+
+	if string(data) != "wasm-binary-content" {
+		t.Errorf("Expected content 'wasm-binary-content', got %q", string(data))
 	}
 }

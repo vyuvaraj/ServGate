@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"servgate/pkg/otel"
@@ -27,6 +28,10 @@ type Config struct {
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "replay" {
 		runReplayCommand()
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "install" {
+		runInstallCommand()
 		return
 	}
 
@@ -156,4 +161,48 @@ func runReplayCommand() {
 		}
 		fmt.Printf("\nReport saved to: %s\n", *outPath)
 	}
+}
+
+func runInstallCommand() {
+	if len(os.Args) < 3 {
+		log.Fatalf("Install: middleware name is required. Example: servgate install jwt-auth")
+	}
+	name := os.Args[2]
+
+	registry := os.Getenv("SERV_REGISTRY")
+	if registry == "" {
+		registry = "https://registry.serv-lang.org"
+	}
+	registry = strings.TrimSuffix(registry, "/")
+
+	url := fmt.Sprintf("%s/middlewares/%s.wasm", registry, name)
+	fmt.Printf("Installing middleware '%s' from %s...\n", name, url)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Fatalf("Install: failed to connect to registry: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Fatalf("Install: registry returned status %d", resp.StatusCode)
+	}
+
+	if err := os.MkdirAll("middlewares", 0755); err != nil {
+		log.Fatalf("Install: failed to create middlewares directory: %v", err)
+	}
+
+	destPath := filepath.Join("middlewares", name+".wasm")
+	destFile, err := os.Create(destPath)
+	if err != nil {
+		log.Fatalf("Install: failed to create destination file: %v", err)
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, resp.Body)
+	if err != nil {
+		log.Fatalf("Install: failed to write file: %v", err)
+	}
+
+	fmt.Printf("✓ Middleware '%s' successfully installed to %s\n", name, destPath)
 }
