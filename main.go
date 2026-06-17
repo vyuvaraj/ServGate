@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -23,6 +25,11 @@ type Config struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "replay" {
+		runReplayCommand()
+		return
+	}
+
 	// Initialize distributed tracing
 	otel.Init()
 
@@ -98,5 +105,55 @@ func main() {
 		if err := server.ListenAndServe(); err != nil {
 			log.Fatalf("Gateway: HTTP server error: %v", err)
 		}
+	}
+}
+
+func runReplayCommand() {
+	fs := flag.NewFlagSet("replay", flag.ExitOnError)
+	logPath := fs.String("log", "", "Path to JSONL traffic log file")
+	mwPath := fs.String("middleware", "", "Path to WASM middleware file")
+	outPath := fs.String("output", "", "Optional path to save JSON report file")
+
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		log.Fatalf("Replay: failed to parse arguments: %v", err)
+	}
+
+	if *logPath == "" || *mwPath == "" {
+		log.Fatalf("Replay: --log and --middleware flags are required. Example: servgate replay --log traffic.jsonl --middleware auth.wasm")
+	}
+
+	wasmBytes, err := os.ReadFile(*mwPath)
+	if err != nil {
+		log.Fatalf("Replay: failed to read WASM file: %v", err)
+	}
+
+	stats, err := proxy.ReplayTraffic(context.Background(), *logPath, wasmBytes)
+	if err != nil {
+		log.Fatalf("Replay: execution error: %v", err)
+	}
+
+	reportBytes, err := json.MarshalIndent(stats, "", "  ")
+	if err != nil {
+		log.Fatalf("Replay: failed to marshal stats report: %v", err)
+	}
+
+	fmt.Println("--- Traffic Replay Summary Report ---")
+	fmt.Printf("Total Requests:  %d\n", stats.Total)
+	fmt.Printf("Successes:       %d\n", stats.Successes)
+	fmt.Printf("Failures:        %d\n", stats.Failures)
+	if stats.Successes > 0 {
+		fmt.Printf("Min Latency:     %v\n", stats.MinLatency)
+		fmt.Printf("Max Latency:     %v\n", stats.MaxLatency)
+		fmt.Printf("Avg Latency:     %v\n", stats.AvgLatency)
+		fmt.Printf("P50 Latency:     %v\n", stats.P50Latency)
+		fmt.Printf("P90 Latency:     %v\n", stats.P90Latency)
+		fmt.Printf("P99 Latency:     %v\n", stats.P99Latency)
+	}
+
+	if *outPath != "" {
+		if err := os.WriteFile(*outPath, reportBytes, 0644); err != nil {
+			log.Fatalf("Replay: failed to write output file: %v", err)
+		}
+		fmt.Printf("\nReport saved to: %s\n", *outPath)
 	}
 }
