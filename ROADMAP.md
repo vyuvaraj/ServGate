@@ -26,10 +26,10 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 
 ---
 
-## Phase 3: Pluggable Protocols & Multiplexing (gRPC & WebSocket)
-- [ ] **gRPC-Web Gateway Transpiler**: Accept HTTP/REST JSON requests and transpile them to binary gRPC calls targeting backend microservices using compiled protobuf definitions.
-- [ ] **WebSocket Proxying**: Support full-duplex WebSocket connection proxying and tunnel routing.
-- [ ] **Load Balancing Routing**: Round-robin and least-connections load balancing across multiple backend server targets.
+## Phase 3: Pluggable Protocols & Multiplexing (gRPC & WebSocket) (Completed)
+- [x] **gRPC-Web Gateway Transpiler**: Accept HTTP/REST JSON requests and transpile them to binary gRPC calls targeting backend microservices using compiled protobuf definitions.
+- [x] **WebSocket Proxying**: Support full-duplex WebSocket connection proxying and tunnel routing.
+- [x] **Load Balancing Routing**: Round-robin and least-connections load balancing across multiple backend server targets.
 
 ---
 

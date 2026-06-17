@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -329,5 +331,208 @@ func TestInstallCommand(t *testing.T) {
 
 	if string(data) != "wasm-binary-content" {
 		t.Errorf("Expected content 'wasm-binary-content', got %q", string(data))
+	}
+}
+
+func TestLoadBalancing(t *testing.T) {
+	hitCount1, hitCount2 := 0, 0
+	ts1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCount1++
+		w.Write([]byte("backend-1"))
+	}))
+	defer ts1.Close()
+
+	ts2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCount2++
+		w.Write([]byte("backend-2"))
+	}))
+	defer ts2.Close()
+
+	routes := []proxy.Route{
+		{
+			Prefix:       "/api/lb",
+			Targets:      []string{ts1.URL, ts2.URL},
+			LoadBalancer: "round_robin",
+		},
+	}
+
+	wasmManager, err := wasm.GetMiddlewareManager(context.Background())
+	if err != nil {
+		t.Fatalf("WASM setup failed: %v", err)
+	}
+
+	gatewayHandler := proxy.NewGatewayHandler(routes, wasmManager, "")
+	gatewayServer := httptest.NewServer(gatewayHandler)
+	defer gatewayServer.Close()
+
+	for i := 0; i < 4; i++ {
+		resp, err := http.Get(gatewayServer.URL + "/api/lb/test")
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		resp.Body.Close()
+	}
+
+	if hitCount1 != 2 || hitCount2 != 2 {
+		t.Errorf("Expected round robin load distribution (2, 2), got (%d, %d)", hitCount1, hitCount2)
+	}
+}
+
+func TestGRPCTranspilation(t *testing.T) {
+	tsGrpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if len(body) < 5 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if body[0] != 0 {
+			t.Errorf("Expected compression flag 0, got %d", body[0])
+		}
+		w.Write(body)
+	}))
+	defer tsGrpc.Close()
+
+	tsRest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != `{"message":"hello"}` {
+			t.Errorf("Expected raw JSON payload, got %q", string(body))
+		}
+		w.Write([]byte(`{"reply":"hi"}`))
+	}))
+	defer tsRest.Close()
+
+	routes := []proxy.Route{
+		{
+			Prefix:        "/api/rest-to-grpc",
+			Target:        tsGrpc.URL,
+			TranspileType: "rest_to_grpc",
+		},
+		{
+			Prefix:        "/api/grpc-to-rest",
+			Target:        tsRest.URL,
+			TranspileType: "grpc_to_rest",
+		},
+	}
+
+	wasmManager, _ := wasm.GetMiddlewareManager(context.Background())
+	gatewayHandler := proxy.NewGatewayHandler(routes, wasmManager, "")
+	gatewayServer := httptest.NewServer(gatewayHandler)
+	defer gatewayServer.Close()
+
+	resp, err := http.Post(gatewayServer.URL+"/api/rest-to-grpc/call", "application/json", strings.NewReader(`{"message":"hello"}`))
+	if err != nil {
+		t.Fatalf("REST request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != `{"message":"hello"}` {
+		t.Errorf("Expected REST response payload, got %q", string(body))
+	}
+
+	rawPayload := []byte(`{"message":"hello"}`)
+	header := make([]byte, 5)
+	header[0] = 0
+	binary.BigEndian.PutUint32(header[1:], uint32(len(rawPayload)))
+	grpcPayload := append(header, rawPayload...)
+
+	resp2, err := http.Post(gatewayServer.URL+"/api/grpc-to-rest/call", "application/grpc", bytes.NewReader(grpcPayload))
+	if err != nil {
+		t.Fatalf("gRPC request failed: %v", err)
+	}
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	if len(body2) < 5 {
+		t.Fatalf("Expected gRPC framed response, got short payload")
+	}
+	jsonReply := body2[5:]
+	if string(jsonReply) != `{"reply":"hi"}` {
+		t.Errorf("Expected gRPC response body, got %q", string(jsonReply))
+	}
+}
+
+func TestWebSocketProxying(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen: %v", err)
+	}
+	defer l.Close()
+
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		reqStr := ""
+		for {
+			buf := make([]byte, 1024)
+			n, err := conn.Read(buf)
+			if err != nil {
+				t.Logf("Mock server read failed: %v", err)
+				return
+			}
+			reqStr += string(buf[:n])
+			if strings.Contains(reqStr, "\r\n\r\n") {
+				break
+			}
+		}
+
+		if !strings.Contains(strings.ToLower(reqStr), "upgrade: websocket") {
+			t.Logf("Mock server missing Upgrade header: %q", reqStr)
+			return
+		}
+
+		handshakeResp := "HTTP/1.1 101 Switching Protocols\r\n" +
+			"Upgrade: websocket\r\n" +
+			"Connection: Upgrade\r\n" +
+			"Sec-WebSocket-Accept: test-accept\r\n\r\n"
+		conn.Write([]byte(handshakeResp))
+
+		io.Copy(conn, conn)
+	}()
+
+	routes := []proxy.Route{
+		{
+			Prefix: "/ws",
+			Target: "http://" + l.Addr().String(),
+		},
+	}
+
+	wasmManager, _ := wasm.GetMiddlewareManager(context.Background())
+	gatewayHandler := proxy.NewGatewayHandler(routes, wasmManager, "")
+	gatewayServer := httptest.NewServer(gatewayHandler)
+	defer gatewayServer.Close()
+
+	dialAddr := strings.TrimPrefix(gatewayServer.URL, "http://")
+	clientConn, err := net.Dial("tcp", dialAddr)
+	if err != nil {
+		t.Fatalf("Failed to dial gateway: %v", err)
+	}
+	defer clientConn.Close()
+
+	handshake := "GET /ws/chat HTTP/1.1\r\n" +
+		"Host: " + dialAddr + "\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Key: test-key\r\n\r\n"
+	clientConn.Write([]byte(handshake))
+
+	buf := make([]byte, 1024)
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		t.Fatalf("Failed to read handshake response: %v", err)
+	}
+	respStr := string(buf[:n])
+	if !strings.Contains(respStr, "101 Switching Protocols") {
+		t.Errorf("Expected 101 Switching Protocols upgrade, got:\n%s", respStr)
+	}
+
+	message := []byte("hello websocket")
+	clientConn.Write(message)
+
+	n, _ = clientConn.Read(buf)
+	if string(buf[:n]) != "hello websocket" {
+		t.Errorf("Expected echo message 'hello websocket', got %q", string(buf[:n]))
 	}
 }
