@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -11,19 +12,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"servgate/pkg/otel"
 	"servgate/pkg/proxy"
 	"servgate/pkg/wasm"
 )
-
-type Config struct {
-	Addr      string        `json:"addr"`
-	AuthToken string        `json:"auth_token"`
-	TlsCert   string        `json:"tls_cert"`
-	TlsKey    string        `json:"tls_key"`
-	Routes    []proxy.Route `json:"routes"`
-}
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "replay" {
@@ -38,15 +32,18 @@ func main() {
 	// Initialize distributed tracing
 	otel.Init()
 
-	configFile, err := os.Open("config.json")
-	if err != nil {
-		log.Fatalf("Gateway: failed to open config: %v", err)
+	var prov proxy.ConfigProvider
+	if os.Getenv("SERV_CONFIG_S3_BUCKET") != "" || os.Getenv("SERVVERSE_DISCOVERY") != "" {
+		log.Println("Gateway: Using S3-compatible configuration provider")
+		prov = proxy.NewS3ConfigProvider()
+	} else {
+		log.Println("Gateway: Using local file config provider")
+		prov = proxy.NewLocalFileProvider("config.json")
 	}
-	defer configFile.Close()
 
-	var cfg Config
-	if err := json.NewDecoder(configFile).Decode(&cfg); err != nil {
-		log.Fatalf("Gateway: failed to parse config: %v", err)
+	cfg, err := prov.Load()
+	if err != nil {
+		log.Fatalf("Gateway: failed to load config: %v", err)
 	}
 
 	wasmManager, err := wasm.GetMiddlewareManager(context.Background())
@@ -55,6 +52,33 @@ func main() {
 	}
 
 	handler := proxy.NewGatewayHandler(cfg.Routes, wasmManager, cfg.AuthToken)
+
+	// If using S3 configuration provider, poll for updates in background
+	if s3Prov, ok := prov.(*proxy.S3ConfigProvider); ok {
+		go func() {
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+			
+			var lastRoutesBytes []byte
+			if rb, err := json.Marshal(cfg.Routes); err == nil {
+				lastRoutesBytes = rb
+			}
+
+			for range ticker.C {
+				newCfg, err := s3Prov.Load()
+				if err != nil {
+					continue
+				}
+				
+				rb, err := json.Marshal(newCfg.Routes)
+				if err == nil && !bytes.Equal(rb, lastRoutesBytes) {
+					log.Printf("Gateway: Config changed on S3. Reloading routes dynamically...")
+					handler.UpdateRoutes(newCfg.Routes)
+					lastRoutesBytes = rb
+				}
+			}
+		}()
+	}
 
 	// Admin API endpoint to dynamically register WASM middlewares on the fly
 	mux := http.NewServeMux()

@@ -43,6 +43,7 @@ type rateLimiter struct {
 
 type GatewayHandler struct {
 	routes         []Route
+	routesMu       sync.RWMutex
 	wasm           *wasm.MiddlewareManager
 	authToken      string
 	rateLimiters   map[string]*rateLimiter   // key: clientIP + routePrefix
@@ -68,6 +69,22 @@ func NewGatewayHandler(routes []Route, wasm *wasm.MiddlewareManager, authToken s
 		rrIndices:      make(map[string]int),
 		activeConns:    make(map[string]int),
 		semanticCaches: semanticCaches,
+	}
+}
+
+func (h *GatewayHandler) UpdateRoutes(newRoutes []Route) {
+	h.routesMu.Lock()
+	defer h.routesMu.Unlock()
+	h.routes = newRoutes
+
+	h.balancerMu.Lock()
+	defer h.balancerMu.Unlock()
+	for _, route := range newRoutes {
+		if route.SemanticCache {
+			if _, exists := h.semanticCaches[route.Prefix]; !exists {
+				h.semanticCaches[route.Prefix] = NewSemanticCache(0.85)
+			}
+		}
 	}
 }
 
@@ -167,15 +184,19 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Route Matching
-	var matchedRoute *Route
+	var matchedRoute Route
+	found := false
+	h.routesMu.RLock()
 	for _, route := range h.routes {
 		if strings.HasPrefix(r.URL.Path, route.Prefix) {
-			matchedRoute = &route
+			matchedRoute = route
+			found = true
 			break
 		}
 	}
+	h.routesMu.RUnlock()
 
-	if matchedRoute == nil {
+	if !found {
 		http.Error(w, "Bad gateway: route match not found", http.StatusBadGateway)
 		return
 	}
@@ -263,7 +284,7 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load Balancing Target Selection
-	selectedTarget := h.selectTarget(matchedRoute)
+	selectedTarget := h.selectTarget(&matchedRoute)
 	h.incConn(selectedTarget)
 	defer h.decConn(selectedTarget)
 
