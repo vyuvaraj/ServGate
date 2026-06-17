@@ -42,7 +42,9 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 
 ## Phase 5: Ecosystem & Console Integration
 - [ ] **ServConsole Administration**: Optional dashboard sync to manage routes, view active connections, and swap WASM middleware modules dynamically.
-- [ ] **Distributed Span Mapping**: Trace request lifecycles starting at the gateway, through queues (`ServQueue`), and into storage (`ServStore`) in a unified trace view (optional).
+- [ ] **Distributed config backend**: Store routes in a ServStore bucket (`serv-config`) instead of local `config.json` for multi-replica deployments with eventual consistency.
+- [ ] **ServConsole OIDC-aware config sync**: Sign config write operations with shared JWT before persisting to distributed backend.
+- [ ] **Distributed Span Mapping**: Trace request lifecycles starting at the gateway, through queues (`ServQueue`), and into storage (`ServStore`) in a unified trace view using a shared OTLP collector.
 
 ---
 
@@ -56,3 +58,6 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 ## Phase 7: Advanced Policies & AI Capabilities
 - [x] **AI-Native Gateway Features**: Built-in semantic caching, prompt guard, and PII redaction middlewares.
 - [ ] **Policy as Code**: Support compiling human-readable access policies directly to executable WASM policies.
+- [ ] **ServGate → ServQueue Webhook Bridge**: Register routes that publish directly to ServQueue topics on incoming HTTP events. Connects gateway and broker tiers.
+
+> See [UNIFIED_ROADMAP.md](../UNIFIED_ROADMAP.md) for the full ecosystem priority matrix and architectural recommendations.
