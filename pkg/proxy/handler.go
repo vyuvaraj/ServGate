@@ -17,10 +17,11 @@ import (
 )
 
 type Route struct {
-	Prefix       string `json:"prefix"`
-	Target       string `json:"target"`
-	Middleware   string `json:"middleware,omitempty"`
-	RateLimitRPM int    `json:"rate_limit_rpm,omitempty"` // Requests Per Minute Limit
+	Prefix             string `json:"prefix"`
+	Target             string `json:"target"`
+	Middleware         string `json:"middleware,omitempty"`          // Request Middleware
+	ResponseMiddleware string `json:"response_middleware,omitempty"` // Response Middleware
+	RateLimitRPM       int    `json:"rate_limit_rpm,omitempty"`      // Requests Per Minute Limit
 }
 
 type rateLimiter struct {
@@ -190,6 +191,29 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.Transport = &RetryingTransport{base: http.DefaultTransport}
+	
+	if matchedRoute.ResponseMiddleware != "" {
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			bodyBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+			resp.Body.Close()
+
+			wasmSpan := otel.StartSpan(fmt.Sprintf("WASM Response Middleware %s", matchedRoute.ResponseMiddleware), traceparent)
+			outputBytes, err := h.wasm.Run(resp.Request.Context(), matchedRoute.ResponseMiddleware, bodyBytes)
+			otel.EndSpan(wasmSpan, err, map[string]interface{}{})
+
+			if err != nil {
+				return fmt.Errorf("response middleware execution failed: %w", err)
+			}
+
+			resp.Body = io.NopCloser(bytes.NewReader(outputBytes))
+			resp.ContentLength = int64(len(outputBytes))
+			resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(outputBytes)))
+			return nil
+		}
+	}
 	
 	r.URL.Host = targetURL.Host
 	r.URL.Scheme = targetURL.Scheme

@@ -104,7 +104,44 @@ func (m *MiddlewareManager) Run(ctx context.Context, name string, input []byte) 
 			return nil, fmt.Errorf("wasm: execution failed: %w", err)
 		}
 	} else {
-		_ = mod.Close(ctx)
+		defer mod.Close(ctx)
+
+		// Direct Memory Optimizations:
+		// Check if module exports allocation and transformation entry points to bypass standard pipes.
+		allocFn := mod.ExportedFunction("allocate")
+		if allocFn == nil {
+			allocFn = mod.ExportedFunction("malloc")
+		}
+		transformFn := mod.ExportedFunction("transform")
+		if transformFn == nil {
+			transformFn = mod.ExportedFunction("process")
+		}
+
+		if allocFn != nil && transformFn != nil {
+			size := uint64(len(input))
+			// Allocate space in guest memory
+			results, allocErr := allocFn.Call(ctx, size)
+			if allocErr == nil && len(results) > 0 {
+				ptr := results[0]
+				// Write directly to guest memory space
+				if mod.Memory().Write(uint32(ptr), input) {
+					// Invoke the transform function (transform(ptr, len))
+					resResults, transErr := transformFn.Call(ctx, ptr, size)
+					if transErr == nil && len(resResults) > 0 {
+						resPtr := resResults[0]
+						// The return value is a 64-bit integer packing: (ptr << 32) | len
+						retPtr := uint32(resPtr >> 32)
+						retLen := uint32(resPtr)
+						
+						if outBytes, readOk := mod.Memory().Read(retPtr, retLen); readOk {
+							outCopy := make([]byte, len(outBytes))
+							copy(outCopy, outBytes)
+							return outCopy, nil
+						}
+					}
+				}
+			}
+		}
 	}
 
 	return stdout.Bytes(), nil

@@ -15,8 +15,8 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 
 ## Phase 2: Performance Optimizations & Shared Memory
 - [x] **WASM Module Caching**: Reuse compiled Wazero modules across requests to eliminate compilation latency.
-- [ ] **Direct memory passing**: Pass request headers and body buffers directly into guest WASM linear memory to eliminate pipe virtualization overhead.
-- [ ] **WASM Response Filters**: Support executing WASM transforms on downstream responses before returning them to clients.
+- [x] **Direct memory passing**: Pass request headers and body buffers directly into guest WASM linear memory to eliminate pipe virtualization overhead.
+- [x] **WASM Response Filters**: Support executing WASM transforms on downstream responses before returning them to clients.
 
 ---
 
