@@ -4,6 +4,12 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 
 ---
 
+## Core Design Philosophy: Standalone-First (Zero Lock-in)
+- **Zero-Dependency Core**: `ServGate` is compiled as a single native binary. It can be run and configured locally using standard JSON files without requiring external databases, brokers, or storage engines.
+- **Optional Serv-verse Synergy**: Seamlessly integrates with the wider ecosystem (`ServQueue`, `ServStore`, `ServRegistry`, and `ServConsole`) to offer advanced tracing, marketplaces, and centralized configuration, but keeps all integrations entirely optional.
+
+---
+
 ## Phase 1: Core Reverse Proxy & WASM (Completed)
 - [x] **Path Routing & Forwarding**: HTTP reverse proxying with route prefix stripping logic.
 - [x] **Declarative Configuration**: Route mappings initialized via a local `config.json` schema.
@@ -13,7 +19,7 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 
 ---
 
-## Phase 2: Performance Optimizations & Shared Memory
+## Phase 2: Performance Optimizations & Shared Memory (Completed)
 - [x] **WASM Module Caching**: Reuse compiled Wazero modules across requests to eliminate compilation latency.
 - [x] **Direct memory passing**: Pass request headers and body buffers directly into guest WASM linear memory to eliminate pipe virtualization overhead.
 - [x] **WASM Response Filters**: Support executing WASM transforms on downstream responses before returning them to clients.
@@ -27,7 +33,7 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 
 ---
 
-## Phase 4: Production Security & Resilience
+## Phase 4: Production Security & Resilience (Completed)
 - [x] **Native TLS/HTTPS Termination**: Serve API gateway endpoints over secure TLS sockets.
 - [x] **Rate Limiting**: Limit client requests using sliding-window rate limit counters.
 - [x] **Circuit Breakers & Retries**: Automatically fail fast or retry backend connections when targets exhibit high latency or error counts.
@@ -35,5 +41,18 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 ---
 
 ## Phase 5: Ecosystem & Console Integration
-- [ ] **ServConsole Administration**: Manage routes, view active connections, and swap WASM middleware modules dynamically via the unified dashboard interface.
-- [ ] **Distributed Span Mapping**: Track request lifecycles starting at the gateway, through queues (`ServQueue`), and into storage (`ServStore`) in a unified trace view.
+- [ ] **ServConsole Administration**: Optional dashboard sync to manage routes, view active connections, and swap WASM middleware modules dynamically.
+- [ ] **Distributed Span Mapping**: Trace request lifecycles starting at the gateway, through queues (`ServQueue`), and into storage (`ServStore`) in a unified trace view (optional).
+
+---
+
+## Phase 6: Traffic Replay & Developer Tooling
+- [ ] **Traffic Replay & Validation**: Implement a dry-run utility (`servgate replay`) to replay production traffic logs against new middleware versions before deployment.
+- [ ] **One-Command Middleware Marketplace**: Install public or private WASM modules via `servgate install <name>` (resolving from `ServRegistry`).
+- [ ] **Native Serv Language Compilation**: Direct compiler toolchain support in `Serv-lang` to build middleware (`serv build --target wasm`).
+
+---
+
+## Phase 7: Advanced Policies & AI Capabilities
+- [ ] **AI-Native Gateway Features**: Built-in semantic caching, prompt guard, and PII redaction middlewares.
+- [ ] **Policy as Code**: Support compiling human-readable access policies directly to executable WASM policies.
