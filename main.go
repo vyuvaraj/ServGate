@@ -20,6 +20,8 @@ import (
 	"servgate/pkg/otel"
 	"servgate/pkg/proxy"
 	"servgate/pkg/wasm"
+
+	"github.com/vyuvaraj/ServShared"
 )
 
 func main() {
@@ -89,14 +91,8 @@ func main() {
 
 	// Admin API endpoint to dynamically register WASM middlewares on the fly
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"healthy"}`))
-	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"healthy"}`))
-	})
+	mux.HandleFunc("/healthz", ServShared.HealthzHandler)
+	mux.HandleFunc("/readyz", ServShared.ReadyzHandler)
 	mux.Handle("/", handler)
 	handleMiddleware := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
