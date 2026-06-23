@@ -97,6 +97,17 @@ func (h *GatewayHandler) GetRoutes() []Route {
 	return h.routes
 }
 
+func (h *GatewayHandler) GetActiveConnections() map[string]int {
+	h.balancerMu.Lock()
+	defer h.balancerMu.Unlock()
+
+	res := make(map[string]int)
+	for k, v := range h.activeConns {
+		res[k] = v
+	}
+	return res
+}
+
 // RetryingTransport implements http.RoundTripper executing retries on network drops
 type RetryingTransport struct {
 	base http.RoundTripper

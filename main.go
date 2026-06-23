@@ -96,6 +96,7 @@ func main() {
 	mux.HandleFunc("/healthz", ServShared.HealthzHandler)
 	mux.HandleFunc("/readyz", ServShared.ReadyzHandler)
 	mux.Handle("/", handler)
+
 	handleMiddleware := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			proxy.WriteJSONError(w, r, "Method not allowed", "ERR_METHOD_NOT_ALLOWED", http.StatusMethodNotAllowed)
@@ -135,6 +136,23 @@ func main() {
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("WASM Middleware " + name + " compiled and registered"))
+	}
+
+	handleConnections := func(w http.ResponseWriter, r *http.Request) {
+		if cfg.AuthToken != "" {
+			if r.Header.Get("Authorization") != "Bearer "+cfg.AuthToken {
+				proxy.WriteJSONError(w, r, "Unauthorized", "ERR_UNAUTHORIZED", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		if r.Method != http.MethodGet {
+			proxy.WriteJSONError(w, r, "Method not allowed", "ERR_METHOD_NOT_ALLOWED", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(handler.GetActiveConnections())
 	}
 
 	handleRoutes := func(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +203,47 @@ func main() {
 			w.Write([]byte("Route registered successfully"))
 			return
 		}
+
+		if r.Method == http.MethodDelete {
+			prefix := r.URL.Query().Get("prefix")
+			if prefix == "" {
+				proxy.WriteJSONError(w, r, "Missing prefix query parameter", "ERR_INVALID_ROUTE_PAYLOAD", http.StatusBadRequest)
+				return
+			}
+
+			currentCfg, err := prov.Load()
+			if err != nil {
+				proxy.WriteJSONError(w, r, "Failed to load config: "+err.Error(), "ERR_CONFIG_LOAD_FAILED", http.StatusInternalServerError)
+				return
+			}
+
+			newRoutes := []proxy.Route{}
+			found := false
+			for _, rt := range currentCfg.Routes {
+				if rt.Prefix == prefix {
+					found = true
+				} else {
+					newRoutes = append(newRoutes, rt)
+				}
+			}
+
+			if !found {
+				proxy.WriteJSONError(w, r, "Route not found", "ERR_ROUTE_NOT_FOUND", http.StatusNotFound)
+				return
+			}
+
+			currentCfg.Routes = newRoutes
+			if err := prov.Save(currentCfg); err != nil {
+				proxy.WriteJSONError(w, r, "Failed to save config: "+err.Error(), "ERR_CONFIG_SAVE_FAILED", http.StatusInternalServerError)
+				return
+			}
+
+			handler.UpdateRoutes(currentCfg.Routes)
+
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Route deleted successfully"))
+			return
+		}
 		
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(handler.GetRoutes())
@@ -194,6 +253,8 @@ func main() {
 	mux.HandleFunc("/api/v1/admin/middleware/", withAdminRateLimit(60, handleMiddleware))
 	mux.HandleFunc("/api/routes", withAdminRateLimit(60, handleRoutes))
 	mux.HandleFunc("/api/v1/routes", withAdminRateLimit(60, handleRoutes))
+	mux.HandleFunc("/api/admin/connections", withAdminRateLimit(60, handleConnections))
+	mux.HandleFunc("/api/v1/admin/connections", withAdminRateLimit(60, handleConnections))
 
 	log.Printf("Starting ServGate reverse proxy on %s...", cfg.Addr)
 	server := &http.Server{
@@ -492,4 +553,3 @@ func withAdminRateLimit(limit int, next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
-

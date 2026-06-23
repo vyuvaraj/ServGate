@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +20,7 @@ type GatewayConfig struct {
 	TlsCert   string  `json:"tls_cert"`
 	TlsKey    string  `json:"tls_key"`
 	Routes    []Route `json:"routes"`
+	Signature string  `json:"signature,omitempty"`
 }
 
 type ConfigProvider interface {
@@ -43,10 +47,22 @@ func (p *LocalFileProvider) Load() (*GatewayConfig, error) {
 	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
 		return nil, err
 	}
+
+	if secret := os.Getenv("SERV_JWT_SECRET"); secret != "" {
+		if err := verifyConfigSignature(&cfg, []byte(secret)); err != nil {
+			return nil, fmt.Errorf("config signature verification failed: %w", err)
+		}
+	}
+
 	return &cfg, nil
 }
 
 func (p *LocalFileProvider) Save(cfg *GatewayConfig) error {
+	if secret := os.Getenv("SERV_JWT_SECRET"); secret != "" {
+		if err := signConfig(cfg, []byte(secret)); err != nil {
+			return fmt.Errorf("failed to sign config: %w", err)
+		}
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -169,10 +185,23 @@ func (p *S3ConfigProvider) Load() (*GatewayConfig, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
 		return nil, err
 	}
+
+	if secret := os.Getenv("SERV_JWT_SECRET"); secret != "" {
+		if err := verifyConfigSignature(&cfg, []byte(secret)); err != nil {
+			return nil, fmt.Errorf("config signature verification failed: %w", err)
+		}
+	}
+
 	return &cfg, nil
 }
 
 func (p *S3ConfigProvider) Save(cfg *GatewayConfig) error {
+	if secret := os.Getenv("SERV_JWT_SECRET"); secret != "" {
+		if err := signConfig(cfg, []byte(secret)); err != nil {
+			return fmt.Errorf("failed to sign config: %w", err)
+		}
+	}
+
 	p.ensureBucketExists()
 
 	url := fmt.Sprintf("%s/%s/%s", p.Endpoint, p.Bucket, p.Key)
@@ -204,4 +233,109 @@ func (p *S3ConfigProvider) Save(cfg *GatewayConfig) error {
 	}
 
 	return nil
+}
+
+func signConfig(cfg *GatewayConfig, secret []byte) error {
+	routesData, err := json.Marshal(cfg.Routes)
+	if err != nil {
+		return err
+	}
+	h := sha256.New()
+	h.Write(routesData)
+	computedHash := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+
+	claims := map[string]interface{}{
+		"config_hash": computedHash,
+		"exp":         time.Now().Add(24 * time.Hour).Unix(),
+		"iss":         "servconsole",
+	}
+	claimsBytes, err := json.Marshal(claims)
+	if err != nil {
+		return err
+	}
+
+	header := map[string]string{
+		"alg": "HS256",
+		"typ": "JWT",
+	}
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		return err
+	}
+
+	headerEnc := base64.RawURLEncoding.EncodeToString(headerBytes)
+	claimsEnc := base64.RawURLEncoding.EncodeToString(claimsBytes)
+
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(headerEnc + "." + claimsEnc))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+
+	cfg.Signature = headerEnc + "." + claimsEnc + "." + sig
+	return nil
+}
+
+func verifyConfigSignature(cfg *GatewayConfig, secret []byte) error {
+	if cfg.Signature == "" {
+		return fmt.Errorf("missing configuration signature")
+	}
+
+	parts := strings.Split(cfg.Signature, ".")
+	if len(parts) != 3 {
+		return fmt.Errorf("invalid signature format")
+	}
+
+	headerPart, payloadPart, signaturePart := parts[0], parts[1], parts[2]
+
+	// Validate signature
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(headerPart + "." + payloadPart))
+	expectedMac := mac.Sum(nil)
+
+	sigBytes, err := decodeBase64Url(signaturePart)
+	if err != nil || !hmac.Equal(sigBytes, expectedMac) {
+		return fmt.Errorf("invalid signature")
+	}
+
+	payloadBytes, err := decodeBase64Url(payloadPart)
+	if err != nil {
+		return fmt.Errorf("failed to decode signature claims")
+	}
+
+	var claims struct {
+		ConfigHash string `json:"config_hash"`
+		Exp        int64  `json:"exp"`
+		Issuer     string `json:"iss"`
+	}
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return fmt.Errorf("invalid signature claims JSON")
+	}
+
+	if claims.Exp > 0 && time.Now().Unix() > claims.Exp {
+		return fmt.Errorf("signature has expired")
+	}
+
+	if claims.Issuer != "servconsole" {
+		return fmt.Errorf("invalid signature issuer: %s", claims.Issuer)
+	}
+
+	routesData, err := json.Marshal(cfg.Routes)
+	if err != nil {
+		return fmt.Errorf("failed to serialize routes for verification")
+	}
+	h := sha256.New()
+	h.Write(routesData)
+	computedHash := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+
+	if claims.ConfigHash != computedHash {
+		return fmt.Errorf("signature hash mismatch (possible configuration tampering)")
+	}
+
+	return nil
+}
+
+func decodeBase64Url(s string) ([]byte, error) {
+	if l := len(s) % 4; l > 0 {
+		s += strings.Repeat("=", 4-l)
+	}
+	return base64.URLEncoding.DecodeString(s)
 }

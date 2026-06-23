@@ -1042,3 +1042,64 @@ func TestAdminRateLimiting(t *testing.T) {
 }
 
 
+
+func TestConfigSignatureVerification(t *testing.T) {
+	os.Setenv("SERV_JWT_SECRET", "super-secret-key-12345")
+	defer os.Unsetenv("SERV_JWT_SECRET")
+
+	tmpFile := filepath.Join(os.TempDir(), "test_config_sig.json")
+	defer os.Remove(tmpFile)
+
+	prov := proxy.NewLocalFileProvider(tmpFile)
+	cfg := &proxy.GatewayConfig{
+		Addr:      ":8080",
+		AuthToken: "token",
+		Routes: []proxy.Route{
+			{Prefix: "/api/v1", Target: "http://localhost:8081"},
+		},
+	}
+
+	err := prov.Save(cfg)
+	if err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
+
+	if cfg.Signature == "" {
+		t.Fatalf("Expected config signature to be populated")
+	}
+
+	loaded, err := prov.Load()
+	if err != nil {
+		t.Fatalf("Expected Load to succeed: %v", err)
+	}
+
+	if loaded.Signature != cfg.Signature {
+		t.Errorf("Loaded signature mismatch")
+	}
+
+	loaded.Routes[0].Prefix = "/api/tampered"
+	data, _ := json.MarshalIndent(loaded, "", "  ")
+	_ = os.WriteFile(tmpFile, data, 0644)
+
+	_, err = prov.Load()
+	if err == nil || !strings.Contains(err.Error(), "signature verification failed") {
+		t.Errorf("Expected signature verification error, got: %v", err)
+	}
+}
+
+func TestRouteDeletionAndActiveConnections(t *testing.T) {
+	routes := []proxy.Route{
+		{Prefix: "/api/test", Target: "http://localhost:8081"},
+	}
+	wasmManager, _ := wasm.GetMiddlewareManager(context.Background())
+	handler := proxy.NewGatewayHandler(routes, wasmManager, "sec")
+
+	if len(handler.GetRoutes()) != 1 {
+		t.Fatalf("Expected 1 route initially")
+	}
+
+	conns := handler.GetActiveConnections()
+	if conns == nil {
+		t.Fatalf("Expected active connections map")
+	}
+}
