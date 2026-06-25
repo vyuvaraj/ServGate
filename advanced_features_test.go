@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"math/big"
@@ -472,5 +473,125 @@ func TestJSONTransformations(t *testing.T) {
 	expected := `{"final_name":"ServClient","unaffected":"keep-me","version":"v1.2"}`
 	if strings.TrimSpace(string(body)) != expected {
 		t.Errorf("expected transformed JSON %s, got %s", expected, string(body))
+	}
+}
+
+func TestGraphQLFederation(t *testing.T) {
+	// Setup 2 mock GraphQL servers representing microservice subgraphs
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data": {"user": {"name": "Alice"}}}`))
+	}))
+	defer serverA.Close()
+
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data": {"orders": [{"id": "1", "amount": 99.99}]}}`))
+	}))
+	defer serverB.Close()
+
+	routes := []proxy.Route{
+		{
+			Prefix: "/graphql",
+			Target: serverA.URL,
+			GraphQLFederation: map[string]string{
+				"user":   serverA.URL,
+				"orders": serverB.URL,
+			},
+		},
+	}
+
+	handler := proxy.NewGatewayHandler(routes, nil, "")
+	defer handler.Close()
+
+	// Query requesting both federated fields concurrently
+	queryPayload := `{"query": "query { user { name } orders { id amount } }"}`
+	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(queryPayload)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(body, &data); err != nil {
+		t.Fatalf("Failed to parse JSON: %v", err)
+	}
+
+	innerData := data["data"].(map[string]interface{})
+	if _, ok := innerData["user"]; !ok {
+		t.Errorf("Expected 'user' field in federated response data")
+	}
+	if _, ok := innerData["orders"]; !ok {
+		t.Errorf("Expected 'orders' field in federated response data")
+	}
+}
+
+func TestDeveloperPortalAPI(t *testing.T) {
+	routes := []proxy.Route{
+		{
+			Prefix: "/v1/api",
+			Target: "http://localhost:9999",
+		},
+	}
+
+	handler := proxy.NewGatewayHandler(routes, nil, "")
+	defer handler.Close()
+
+	// Test OpenAPI Spec json
+	reqJson := httptest.NewRequest("GET", "/api/docs/openapi.json", nil)
+	wJson := httptest.NewRecorder()
+	handler.ServeHTTP(wJson, reqJson)
+
+	if wJson.Code != http.StatusOK {
+		t.Errorf("Expected 200 for openapi.json, got %d", wJson.Code)
+	}
+
+	// Test Developer Portal docs html page
+	reqHTML := httptest.NewRequest("GET", "/api/docs", nil)
+	wHTML := httptest.NewRecorder()
+	handler.ServeHTTP(wHTML, reqHTML)
+
+	if wHTML.Code != http.StatusOK {
+		t.Errorf("Expected 200 for dev portal HTML page, got %d", wHTML.Code)
+	}
+	if !strings.Contains(wHTML.Body.String(), "Developer Portal") {
+		t.Errorf("Expected HTML to contain Developer Portal title")
+	}
+}
+
+func TestOIDCConfigSync(t *testing.T) {
+	os.Setenv("SERV_JWT_SECRET", "super-secret-oidc-key")
+	defer os.Unsetenv("SERV_JWT_SECRET")
+
+	prov := proxy.NewLocalFileProvider("test_config.json")
+	defer os.Remove("test_config.json")
+
+	cfg := &proxy.GatewayConfig{
+		Addr: ":8080",
+		Routes: []proxy.Route{
+			{Prefix: "/auth", Target: "http://localhost:5000"},
+		},
+	}
+
+	// Sign and save config
+	err := prov.Save(cfg)
+	if err != nil {
+		t.Fatalf("Failed to save and sign config: %v", err)
+	}
+
+	// Verify we can load it successfully with matching secret
+	loaded, err := prov.Load()
+	if err != nil {
+		t.Fatalf("Failed to load signed config: %v", err)
+	}
+	if len(loaded.Routes) != 1 {
+		t.Errorf("Expected 1 route, got %d", len(loaded.Routes))
 	}
 }

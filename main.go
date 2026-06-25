@@ -157,7 +157,18 @@ func main() {
 
 	handleRoutes := func(w http.ResponseWriter, r *http.Request) {
 		if cfg.AuthToken != "" {
-			if r.Header.Get("Authorization") != "Bearer "+cfg.AuthToken {
+			authHeader := r.Header.Get("Authorization")
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			authenticated := false
+			if token == cfg.AuthToken {
+				authenticated = true
+			} else if jwtSec := os.Getenv("SERV_JWT_SECRET"); jwtSec != "" {
+				if _, ok := proxy.ValidateJWT(token, []byte(jwtSec)); ok {
+					authenticated = true
+				}
+			}
+
+			if !authenticated {
 				proxy.WriteJSONError(w, r, "Unauthorized", "ERR_UNAUTHORIZED", http.StatusUnauthorized)
 				return
 			}
