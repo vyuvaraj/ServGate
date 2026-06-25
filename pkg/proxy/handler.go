@@ -2,8 +2,11 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -50,6 +53,13 @@ type Route struct {
 	AccessLogPath      string            `json:"access_log_path,omitempty"`     // Path to access log file (default: ./logs/access.jsonl)
 	CacheTTLSeconds    int               `json:"cache_ttl_seconds,omitempty"`   // Response cache TTL in seconds (0 = disabled)
 	CacheMethods       []string          `json:"cache_methods,omitempty"`       // HTTP methods to cache (default: ["GET"])
+	ClientCertPath     string            `json:"client_cert_path,omitempty"`    // Path to client TLS cert
+	ClientKeyPath      string            `json:"client_key_path,omitempty"`     // Path to client TLS key
+	RootCAPath         string            `json:"root_ca_path,omitempty"`        // Path to backend root CA cert
+	MaxConcurrentRequests int            `json:"max_concurrent_requests,omitempty"` // Max concurrent requests to backend
+	MaxQueueSize       int               `json:"max_queue_size,omitempty"`      // Max requests allowed to queue
+	QueueTimeoutMs     int               `json:"queue_timeout_ms,omitempty"`    // Timeout for queueing in milliseconds
+	GoMiddleware       string            `json:"go_middleware,omitempty"`       // Name of native Go middleware plugin
 }
 
 type MetricsTracker struct {
@@ -94,6 +104,58 @@ type rateLimiter struct {
 	history []time.Time
 }
 
+type BackpressureLimiter struct {
+	sem     chan struct{}
+	queue   chan struct{}
+	timeout time.Duration
+}
+
+func NewBackpressureLimiter(maxConcurrent, maxQueue, timeoutMs int) *BackpressureLimiter {
+	if maxConcurrent <= 0 {
+		return nil
+	}
+	timeout := 5000 * time.Millisecond
+	if timeoutMs > 0 {
+		timeout = time.Duration(timeoutMs) * time.Millisecond
+	}
+	return &BackpressureLimiter{
+		sem:     make(chan struct{}, maxConcurrent),
+		queue:   make(chan struct{}, maxQueue),
+		timeout: timeout,
+	}
+}
+
+func (l *BackpressureLimiter) Acquire(ctx context.Context) (func(), error) {
+	// Try to acquire slot immediately
+	select {
+	case l.sem <- struct{}{}:
+		return func() { <-l.sem }, nil
+	default:
+	}
+
+	// If no slot, try to enqueue
+	select {
+	case l.queue <- struct{}{}:
+		// Enqueued, wait for slot, timeout, or context cancellation
+		defer func() { <-l.queue }()
+
+		timer := time.NewTimer(l.timeout)
+		defer timer.Stop()
+
+		select {
+		case l.sem <- struct{}{}:
+			return func() { <-l.sem }, nil
+		case <-timer.C:
+			return nil, fmt.Errorf("queue timeout")
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	default:
+		// Queue full
+		return nil, fmt.Errorf("queue full")
+	}
+}
+
 type GatewayHandler struct {
 	routes         []Route
 	routesMu       sync.RWMutex
@@ -108,12 +170,58 @@ type GatewayHandler struct {
 	accessLoggers  map[string]*AccessLogger  // route prefix -> logger
 	responseCaches map[string]*ResponseCache // route prefix -> cache
 	metricsTracker *MetricsTracker
+	transports     map[string]http.RoundTripper // route prefix -> custom mTLS transport
+	transportsMu   sync.RWMutex
+	limiters       map[string]*BackpressureLimiter // route prefix -> backpressure limiter
+	limitersMu     sync.RWMutex
+}
+
+func createMTLSTransport(clientCertPath, clientKeyPath, rootCAPath string) (http.RoundTripper, error) {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	if clientCertPath != "" && clientKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client key pair: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	if rootCAPath != "" {
+		caCert, err := os.ReadFile(rootCAPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read root CA file: %w", err)
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+		tlsConfig.RootCAs = caCertPool
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+		Proxy:           http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	return transport, nil
 }
 
 func NewGatewayHandler(routes []Route, wasm *wasm.MiddlewareManager, authToken string) *GatewayHandler {
 	semanticCaches := make(map[string]*SemanticCache)
 	accessLoggers := make(map[string]*AccessLogger)
 	responseCaches := make(map[string]*ResponseCache)
+	transports := make(map[string]http.RoundTripper)
+	limiters := make(map[string]*BackpressureLimiter)
 
 	for _, route := range routes {
 		if route.SemanticCache {
@@ -133,6 +241,17 @@ func NewGatewayHandler(routes []Route, wasm *wasm.MiddlewareManager, authToken s
 		}
 		if route.CacheTTLSeconds > 0 {
 			responseCaches[route.Prefix] = NewResponseCache(time.Duration(route.CacheTTLSeconds) * time.Second)
+		}
+		if route.ClientCertPath != "" || route.RootCAPath != "" {
+			tr, err := createMTLSTransport(route.ClientCertPath, route.ClientKeyPath, route.RootCAPath)
+			if err != nil {
+				log.Printf("Gateway: failed to create mTLS transport for %s: %v", route.Prefix, err)
+			} else {
+				transports[route.Prefix] = tr
+			}
+		}
+		if route.MaxConcurrentRequests > 0 {
+			limiters[route.Prefix] = NewBackpressureLimiter(route.MaxConcurrentRequests, route.MaxQueueSize, route.QueueTimeoutMs)
 		}
 	}
 
@@ -155,6 +274,8 @@ func NewGatewayHandler(routes []Route, wasm *wasm.MiddlewareManager, authToken s
 		accessLoggers:  accessLoggers,
 		responseCaches: responseCaches,
 		metricsTracker: tracker,
+		transports:     transports,
+		limiters:       limiters,
 	}
 }
 
@@ -165,6 +286,13 @@ func (h *GatewayHandler) UpdateRoutes(newRoutes []Route) {
 
 	h.balancerMu.Lock()
 	defer h.balancerMu.Unlock()
+
+	h.transportsMu.Lock()
+	defer h.transportsMu.Unlock()
+
+	h.limitersMu.Lock()
+	defer h.limitersMu.Unlock()
+
 	for _, route := range newRoutes {
 		if route.SemanticCache {
 			if _, exists := h.semanticCaches[route.Prefix]; !exists {
@@ -188,6 +316,21 @@ func (h *GatewayHandler) UpdateRoutes(newRoutes []Route) {
 				} else {
 					h.accessLoggers[route.Prefix] = logger
 				}
+			}
+		}
+		if route.ClientCertPath != "" || route.RootCAPath != "" {
+			if _, exists := h.transports[route.Prefix]; !exists {
+				tr, err := createMTLSTransport(route.ClientCertPath, route.ClientKeyPath, route.RootCAPath)
+				if err != nil {
+					log.Printf("Gateway: failed to create mTLS transport for %s: %v", route.Prefix, err)
+				} else {
+					h.transports[route.Prefix] = tr
+				}
+			}
+		}
+		if route.MaxConcurrentRequests > 0 {
+			if _, exists := h.limiters[route.Prefix]; !exists {
+				h.limiters[route.Prefix] = NewBackpressureLimiter(route.MaxConcurrentRequests, route.MaxQueueSize, route.QueueTimeoutMs)
 			}
 		}
 	}
@@ -387,6 +530,24 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Backpressure & Concurrency Limiting
+	h.limitersMu.RLock()
+	limiter, hasLimiter := h.limiters[matchedRoute.Prefix]
+	h.limitersMu.RUnlock()
+	if hasLimiter && limiter != nil {
+		release, err := limiter.Acquire(r.Context())
+		if err != nil {
+			w.Header().Set("Retry-After", "5")
+			if err.Error() == "queue full" {
+				WriteJSONError(w, r, "Too Many Requests: backpressure queue full", "ERR_QUEUE_FULL", http.StatusTooManyRequests)
+			} else {
+				WriteJSONError(w, r, "Service Unavailable: queue timeout", "ERR_BACKPRESSURE_TIMEOUT", http.StatusServiceUnavailable)
+			}
+			return
+		}
+		defer release()
+	}
+
 	// Distributed Tracing: Extract or start trace context span
 	traceparent := r.Header.Get("traceparent")
 	span := otel.StartSpan(fmt.Sprintf("%s %s", r.Method, r.URL.Path), traceparent)
@@ -559,6 +720,34 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Go Plugin Request Middleware execution if registered
+	if matchedRoute.GoMiddleware != "" {
+		if p, ok := GetPlugin(matchedRoute.GoMiddleware); ok {
+			pluginResp, pErr := p.OnRequest(r)
+			if pErr != nil {
+				otel.EndSpan(span, pErr, map[string]interface{}{})
+				WriteJSONError(w, r, "Internal Server Error: Go Plugin execution failed", "ERR_GO_PLUGIN_FAILED", http.StatusInternalServerError)
+				h.metricsTracker.IncError()
+				return
+			}
+			if pluginResp != nil {
+				defer pluginResp.Body.Close()
+				for k, vs := range pluginResp.Header {
+					for _, v := range vs {
+						w.Header().Add(k, v)
+					}
+				}
+				w.WriteHeader(pluginResp.StatusCode)
+				io.Copy(w, pluginResp.Body)
+				otel.EndSpan(span, nil, map[string]interface{}{
+					"http.route":             matchedRoute.Prefix,
+					"go_plugin.shortcircuit": true,
+				})
+				return
+			}
+		}
+	}
+
 	// Load Balancing Target Selection
 	selectedTarget := h.selectTarget(&matchedRoute)
 	h.incConn(selectedTarget)
@@ -701,8 +890,17 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.Header().Set("X-Canary-Target", selectedTarget)
 	}
 
+	h.transportsMu.RLock()
+	customTransport, hasTransport := h.transports[matchedRoute.Prefix]
+	h.transportsMu.RUnlock()
+
+	baseTransport := http.DefaultTransport
+	if hasTransport {
+		baseTransport = customTransport
+	}
+
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	proxy.Transport = &RetryingTransport{base: http.DefaultTransport}
+	proxy.Transport = &RetryingTransport{base: baseTransport}
 
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		bodyBytes, err := io.ReadAll(resp.Body)
@@ -710,6 +908,23 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("failed to read response body: %w", err)
 		}
 		resp.Body.Close()
+
+		// Run native Go Plugin Response Middleware if registered
+		if matchedRoute.GoMiddleware != "" {
+			if p, ok := GetPlugin(matchedRoute.GoMiddleware); ok {
+				tempResp := &http.Response{
+					StatusCode: resp.StatusCode,
+					Header:     resp.Header,
+					Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
+				}
+				pErr := p.OnResponse(resp.Request, rec, tempResp)
+				if pErr != nil {
+					return fmt.Errorf("go plugin OnResponse failed: %w", pErr)
+				}
+				bodyBytes, _ = io.ReadAll(tempResp.Body)
+				tempResp.Body.Close()
+			}
+		}
 
 		// Run WASM Response Middleware if registered
 		if matchedRoute.ResponseMiddleware != "" {
