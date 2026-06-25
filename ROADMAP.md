@@ -41,10 +41,10 @@ This document outlines the planned evolutionary stages of **ServGate** to evolve
 ---
 
 ## Phase 5: Ecosystem & Console Integration
-- [ ] **ServConsole Administration**: Optional dashboard sync to manage routes, view active connections, and swap WASM middleware modules dynamically.
+- [x] **ServConsole Administration**: Optional dashboard sync to manage routes, view active connections, and swap WASM middleware modules dynamically.
 - [x] **Distributed config backend**: Store routes in a ServStore bucket (`serv-config`) instead of local `config.json` for multi-replica deployments with eventual consistency.
 - [x] **ServConsole OIDC-aware config sync**: Sign config write operations with shared JWT before persisting to distributed backend.
-- [ ] **Distributed Span Mapping**: Trace request lifecycles starting at the gateway, through queues (`ServQueue`), and into storage (`ServStore`) in a unified trace view using a shared OTLP collector.
+- [x] **Distributed Span Mapping**: Trace request lifecycles starting at the gateway, through queues (`ServQueue`), and into storage (`ServStore`) in a unified trace view using a shared OTLP collector.
 
 ---
 

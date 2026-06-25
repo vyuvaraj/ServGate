@@ -809,3 +809,65 @@ func TestWasmABTesting(t *testing.T) {
 	}
 }
 
+func TestServConsoleAdministration(t *testing.T) {
+	handler := proxy.NewGatewayHandler([]proxy.Route{}, nil, "token-x")
+	defer handler.Close()
+
+	mux := http.NewServeMux()
+	handleConsoleSync := func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer token-x" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodGet {
+			snapshot := map[string]interface{}{
+				"routes":              handler.GetRoutes(),
+				"active_connections":  handler.GetActiveConnections(),
+				"metrics":             handler.GetMetricsSnapshot(),
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(snapshot)
+			return
+		}
+		if r.Method == http.MethodPost {
+			var payload struct {
+				Routes []proxy.Route `json:"routes"`
+			}
+			json.NewDecoder(r.Body).Decode(&payload)
+			handler.UpdateRoutes(payload.Routes)
+			w.WriteHeader(http.StatusOK)
+		}
+	}
+	mux.HandleFunc("/api/v1/admin/console/sync", handleConsoleSync)
+
+	reqGet := httptest.NewRequest("GET", "/api/v1/admin/console/sync", nil)
+	reqGet.Header.Set("Authorization", "Bearer token-x")
+	recGet := httptest.NewRecorder()
+	mux.ServeHTTP(recGet, reqGet)
+
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d", recGet.Code)
+	}
+
+	var snap map[string]interface{}
+	json.Unmarshal(recGet.Body.Bytes(), &snap)
+	if _, ok := snap["metrics"]; !ok {
+		t.Errorf("Expected metrics in snapshot")
+	}
+
+	routesPayload := `{"routes":[{"prefix":"/v2","target":"http://localhost:7001"}]}`
+	reqPost := httptest.NewRequest("POST", "/api/v1/admin/console/sync", strings.NewReader(routesPayload))
+	reqPost.Header.Set("Authorization", "Bearer token-x")
+	recPost := httptest.NewRecorder()
+	mux.ServeHTTP(recPost, reqPost)
+
+	if recPost.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d", recPost.Code)
+	}
+
+	if len(handler.GetRoutes()) != 1 {
+		t.Errorf("Expected 1 route, got %d", len(handler.GetRoutes()))
+	}
+}
+
+

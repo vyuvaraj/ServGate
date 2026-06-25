@@ -297,7 +297,65 @@ func main() {
 		w.Write([]byte(`{"status":"success","message":"Route registered successfully via compiler connector"}`))
 	}
 
+	handleConsoleSync := func(w http.ResponseWriter, r *http.Request) {
+		if cfg.AuthToken != "" {
+			authHeader := r.Header.Get("Authorization")
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			authenticated := false
+			if token == cfg.AuthToken {
+				authenticated = true
+			} else if jwtSec := os.Getenv("SERV_JWT_SECRET"); jwtSec != "" {
+				if _, ok := proxy.ValidateJWT(token, []byte(jwtSec)); ok {
+					authenticated = true
+				}
+			}
+
+			if !authenticated {
+				proxy.WriteJSONError(w, r, "Unauthorized", "ERR_UNAUTHORIZED", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		if r.Method == http.MethodPost {
+			var payload struct {
+				Routes []proxy.Route `json:"routes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				proxy.WriteJSONError(w, r, "Invalid payload", "ERR_INVALID_PAYLOAD", http.StatusBadRequest)
+				return
+			}
+
+			currentCfg, err := prov.Load()
+			if err == nil {
+				currentCfg.Routes = payload.Routes
+				_ = prov.Save(currentCfg)
+			}
+
+			handler.UpdateRoutes(payload.Routes)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"success","message":"Console sync updated configuration successfully"}`))
+			return
+		}
+
+		if r.Method == http.MethodGet {
+			snapshot := map[string]interface{}{
+				"routes":              handler.GetRoutes(),
+				"active_connections":  handler.GetActiveConnections(),
+				"metrics":             handler.GetMetricsSnapshot(),
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(snapshot)
+			return
+		}
+
+		proxy.WriteJSONError(w, r, "Method not allowed", "ERR_METHOD_NOT_ALLOWED", http.StatusMethodNotAllowed)
+	}
+
 	mux.HandleFunc("/api/v1/routes/register", withAdminRateLimit(60, handleRouteRegister))
+	mux.HandleFunc("/api/admin/console/sync", withAdminRateLimit(60, handleConsoleSync))
+	mux.HandleFunc("/api/v1/admin/console/sync", withAdminRateLimit(60, handleConsoleSync))
 	mux.HandleFunc("/api/admin/middleware/", withAdminRateLimit(60, handleMiddleware))
 	mux.HandleFunc("/api/v1/admin/middleware/", withAdminRateLimit(60, handleMiddleware))
 	mux.HandleFunc("/api/routes", withAdminRateLimit(60, handleRoutes))
