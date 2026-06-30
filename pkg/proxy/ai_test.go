@@ -150,3 +150,24 @@ func TestAiSemanticCache(t *testing.T) {
 		t.Errorf("Expected X-Cache header HIT-SEMANTIC, got %q", resp2.Header.Get("X-Cache"))
 	}
 }
+
+func TestAiPromptABTesting(t *testing.T) {
+	test := PromptABTest{
+		PromptName: "summarize",
+		Versions: map[string]string{
+			"v1": "Summarize this: {{text}}",
+			"v2": "Give a short summary of: {{text}}",
+		},
+		Weights: map[string]int{
+			"v1": 80,
+			"v2": 20,
+		},
+	}
+
+	vSelected1, _ := SelectABPromptVersion(test, 5)
+	vSelected2, _ := SelectABPromptVersion(test, 99)
+
+	if vSelected1 == "" || vSelected2 == "" {
+		t.Fatalf("Failed to select prompt version")
+	}
+}

@@ -156,3 +156,36 @@ func (c *SemanticCache) Set(prompt string, response []byte) {
 		Magnitude: mag,
 	})
 }
+
+type PromptABTest struct {
+	PromptName string            `json:"prompt_name"`
+	Versions   map[string]string `json:"versions"`
+	Weights    map[string]int    `json:"weights"`
+}
+
+func SelectABPromptVersion(test PromptABTest, seed int) (string, string) {
+	totalWeight := 0
+	for _, w := range test.Weights {
+		totalWeight += w
+	}
+	if totalWeight <= 0 {
+		for v, tpl := range test.Versions {
+			return v, tpl
+		}
+		return "", ""
+	}
+
+	val := seed % totalWeight
+	current := 0
+	for v, w := range test.Weights {
+		current += w
+		if val < current {
+			return v, test.Versions[v]
+		}
+	}
+
+	for v, tpl := range test.Versions {
+		return v, tpl
+	}
+	return "", ""
+}
