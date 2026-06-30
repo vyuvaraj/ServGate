@@ -128,4 +128,4 @@ These create a **moat** around ServGate â€” capabilities that Kong, Envoy, AWS A
 - [x] **Ecosystem Version Manifest** — GET /api/version endpoint returning service name, version, and minimum compatible API version for serv doctor compatibility checks (API.4)
 - [x] **Deprecation Header Standard** — Deprecated routes respond with Deprecation: true and Sunset: <date> headers giving consumers migration windows (API.5)
 
-- [ ] **Ecosystem Performance Suite** — Multi-tiered Go micro-benchmarks, k6 component load tests, and distributed end-to-end telemetry workloads (OPS.7)
+- [x] **Ecosystem Performance Suite** — Multi-tiered Go micro-benchmarks, k6 component load tests, and distributed end-to-end telemetry workloads (OPS.7)
