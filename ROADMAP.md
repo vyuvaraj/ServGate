@@ -117,3 +117,7 @@ These create a **moat** around ServGate — capabilities that Kong, Envoy, AWS A
 | 10.10 | **Automatic PII detection & redaction** | Small | Built-in regex + NER-based PII scanner that redacts sensitive data from request/response logs before they hit the observability layer. Already partially implemented. | AI-native gateway understands data sensitivity. Traditional gateways log everything or nothing. |
 
 > See [UNIFIED_ROADMAP.md](../UNIFIED_ROADMAP.md) for the full ecosystem priority matrix and architectural recommendations.
+
+## Phase 11: DevOps & Infrastructure (Pending)
+- [ ] **GitOps Config Sync** — Git repository webhooks to automatically re-sync gateway routes (OPS.5)
+- [ ] **Auto TLS Let's Encrypt** — Integrated ACME client for automated certificate provisioning (OPS.6)
