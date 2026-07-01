@@ -115,7 +115,7 @@ func TestRateLimiting(t *testing.T) {
 		w.Write([]byte("backend-response"))
 	})
 	backendServer := &http.Server{
-		Addr:    "127.0.0.1:8093",
+		Addr:    "127.0.0.1:8073",
 		Handler: backendHandler,
 	}
 	go backendServer.ListenAndServe()
@@ -125,7 +125,7 @@ func TestRateLimiting(t *testing.T) {
 	routes := []proxy.Route{
 		{
 			Prefix:       "/api/v1/limited",
-			Target:       "http://127.0.0.1:8093",
+			Target:       "http://127.0.0.1:8073",
 			RateLimitRPM: 2,
 		},
 	}
@@ -137,7 +137,7 @@ func TestRateLimiting(t *testing.T) {
 
 	gatewayHandler := proxy.NewGatewayHandler(routes, wasmManager, "")
 	gatewayServer := &http.Server{
-		Addr:    "127.0.0.1:8094",
+		Addr:    "127.0.0.1:8074",
 		Handler: gatewayHandler,
 	}
 	go gatewayServer.ListenAndServe()
@@ -147,7 +147,7 @@ func TestRateLimiting(t *testing.T) {
 
 	// Issue 2 requests, which should succeed
 	for i := 0; i < 2; i++ {
-		resp, err := http.Get("http://127.0.0.1:8094/api/v1/limited/test")
+		resp, err := http.Get("http://127.0.0.1:8074/api/v1/limited/test")
 		if err != nil {
 			t.Fatalf("Request %d failed: %v", i, err)
 		}
@@ -158,7 +158,7 @@ func TestRateLimiting(t *testing.T) {
 	}
 
 	// The 3rd request should be rate limited (429)
-	resp, err := http.Get("http://127.0.0.1:8094/api/v1/limited/test")
+	resp, err := http.Get("http://127.0.0.1:8074/api/v1/limited/test")
 	if err != nil {
 		t.Fatalf("3rd request failed: %v", err)
 	}
@@ -1391,6 +1391,87 @@ func TestMaxBodySizeLimit(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode == http.StatusOK {
 		t.Errorf("Expected request to be rejected, but got 200 OK")
+	}
+}
+
+func TestGitOpsConfigSyncWebhook(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "servgate-gitops-*.json")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	initialCfg := proxy.GatewayConfig{
+		Addr: ":12345",
+		Routes: []proxy.Route{
+			{Prefix: "/old", Target: "http://localhost:8081"},
+		},
+	}
+	data, _ := json.Marshal(initialCfg)
+	tmpFile.Write(data)
+	tmpFile.Close()
+
+	localProv := proxy.NewLocalFileProvider(tmpFile.Name())
+
+	mux := http.NewServeMux()
+	cfg := &proxy.GatewayConfig{
+		AuthToken: "secret",
+		Routes:    initialCfg.Routes,
+	}
+	handler := proxy.NewGatewayHandler(cfg.Routes, nil, cfg.AuthToken)
+
+	handleGitOpsWebhook := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			proxy.WriteJSONError(w, r, "Method not allowed", "ERR_METHOD_NOT_ALLOWED", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			proxy.WriteJSONError(w, r, "Unauthorized", "ERR_UNAUTHORIZED", http.StatusUnauthorized)
+			return
+		}
+
+		newCfg, err := localProv.Load()
+		if err != nil {
+			proxy.WriteJSONError(w, r, "Failed to load config: "+err.Error(), "ERR_CONFIG_LOAD_FAILED", http.StatusInternalServerError)
+			return
+		}
+
+		handler.UpdateRoutes(newCfg.Routes)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"success"}`))
+	}
+
+	mux.HandleFunc("/api/gitops/webhook", handleGitOpsWebhook)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	updatedCfg := proxy.GatewayConfig{
+		Addr: ":12345",
+		Routes: []proxy.Route{
+			{Prefix: "/new", Target: "http://localhost:8082"},
+		},
+	}
+	data2, _ := json.Marshal(updatedCfg)
+	os.WriteFile(tmpFile.Name(), data2, 0644)
+
+	client := &http.Client{}
+	req, _ := http.NewRequest("POST", server.URL+"/api/gitops/webhook", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("failed to post webhook: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	routes := handler.GetRoutes()
+	if len(routes) != 1 || routes[0].Prefix != "/new" {
+		t.Errorf("expected updated routes, got %+v", routes)
 	}
 }
 

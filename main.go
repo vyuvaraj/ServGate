@@ -23,6 +23,8 @@ import (
 	"servgate/pkg/proxy"
 	"servgate/pkg/wasm"
 
+	"golang.org/x/crypto/acme/autocert"
+
 	"github.com/vyuvaraj/ServShared"
 )
 
@@ -354,6 +356,57 @@ func main() {
 		proxy.WriteJSONError(w, r, "Method not allowed", "ERR_METHOD_NOT_ALLOWED", http.StatusMethodNotAllowed)
 	}
 
+	handleGitOpsWebhook := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			proxy.WriteJSONError(w, r, "Method not allowed", "ERR_METHOD_NOT_ALLOWED", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if cfg.AuthToken != "" {
+			authHeader := r.Header.Get("Authorization")
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			if token != cfg.AuthToken {
+				proxy.WriteJSONError(w, r, "Unauthorized", "ERR_UNAUTHORIZED", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		configDir := "."
+		if filePath, ok := prov.(*proxy.LocalFileProvider); ok {
+			configDir = filepath.Dir(filePath.Path)
+		}
+
+		log.Printf("GitOps: Webhook triggered. Running git pull in directory: %s", configDir)
+		cmd := exec.Command("git", "pull")
+		cmd.Dir = configDir
+		var out bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if err != nil {
+			log.Printf("GitOps: git pull failed: %v, stderr: %s", err, stderr.String())
+		} else {
+			log.Printf("GitOps: git pull completed. Output: %s", out.String())
+		}
+
+		newCfg, err := prov.Load()
+		if err != nil {
+			proxy.WriteJSONError(w, r, "Failed to load reloaded config: "+err.Error(), "ERR_CONFIG_LOAD_FAILED", http.StatusInternalServerError)
+			return
+		}
+
+		handler.UpdateRoutes(newCfg.Routes)
+		log.Println("GitOps: Configuration re-sync completed successfully.")
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"success","message":"GitOps config sync completed successfully","git_output":"` + strings.TrimSpace(out.String()) + `"}`))
+	}
+
+	mux.HandleFunc("/api/gitops/webhook", withAdminRateLimit(60, handleGitOpsWebhook))
+	mux.HandleFunc("/api/v1/gitops/webhook", withAdminRateLimit(60, handleGitOpsWebhook))
+
 	mux.HandleFunc("/api/v1/routes/register", withAdminRateLimit(60, handleRouteRegister))
 	mux.HandleFunc("/api/admin/console/sync", withAdminRateLimit(60, handleConsoleSync))
 	mux.HandleFunc("/api/v1/admin/console/sync", withAdminRateLimit(60, handleConsoleSync))
@@ -395,10 +448,11 @@ func main() {
 	// AI Billing API endpoint
 	handleAIBilling := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			metrics := handler.GetAIBillingMetrics()
 			json.NewEncoder(w).Encode(metrics)
-		} else if r.Method == http.MethodPost {
+		case http.MethodPost:
 			// Set budget
 			var req struct {
 				TenantID           string  `json:"tenant_id"`
@@ -442,8 +496,31 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	autoTLS := os.Getenv("SERV_AUTO_TLS") == "true"
+	autoTLSDomain := os.Getenv("SERV_AUTO_TLS_DOMAIN")
+
 	go func() {
-		if cfg.TlsCert != "" && cfg.TlsKey != "" {
+		if autoTLS && autoTLSDomain != "" {
+			log.Printf("Gateway: Enabling Let's Encrypt Auto TLS for domain: %s", autoTLSDomain)
+			certManager := autocert.Manager{
+				Prompt:     autocert.AcceptTOS,
+				HostPolicy: autocert.HostWhitelist(autoTLSDomain),
+				Cache:      autocert.DirCache("certs"),
+			}
+			server.Addr = ":443"
+			server.TLSConfig = certManager.TLSConfig()
+			
+			go func() {
+				log.Printf("Gateway: Starting Let's Encrypt HTTP challenge redirect on :80")
+				if err := http.ListenAndServe(":80", certManager.HTTPHandler(nil)); err != nil {
+					log.Printf("autocert HTTP challenge listener error: %v", err)
+				}
+			}()
+			
+			if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("Gateway: HTTP server error: %v", err)
+			}
+		} else if cfg.TlsCert != "" && cfg.TlsKey != "" {
 			if err := server.ListenAndServeTLS(cfg.TlsCert, cfg.TlsKey); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("Gateway: HTTP server error: %v", err)
 			}

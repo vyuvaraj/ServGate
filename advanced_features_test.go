@@ -793,9 +793,10 @@ func TestWasmABTesting(t *testing.T) {
 	v2Count := 0
 	for i := 0; i < 1000; i++ {
 		selected := handler.SelectWASMMiddlewareForTest(&route)
-		if selected == "wasm-v1" {
+		switch selected {
+		case "wasm-v1":
 			v1Count++
-		} else if selected == "wasm-v2" {
+		case "wasm-v2":
 			v2Count++
 		}
 	}
