@@ -622,13 +622,14 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.metricsTracker.IncRequest()
 
 	if r.URL.Path == "/api/tenants/policies" {
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			h.tenantPoliciesMu.RLock()
 			defer h.tenantPoliciesMu.RUnlock()
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(h.tenantPolicies)
 			return
-		} else if r.Method == http.MethodPost {
+		case http.MethodPost:
 			var policy TenantPolicy
 			if err := json.NewDecoder(r.Body).Decode(&policy); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
