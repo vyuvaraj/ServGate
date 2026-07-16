@@ -19,6 +19,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -103,6 +104,7 @@ type Route struct {
 	SemanticRateLimit     bool              `json:"semantic_rate_limit,omitempty"`   // AI Semantic Rate Limiting
 	SemanticTokenLimitPerMin int            `json:"semantic_token_limit_per_min,omitempty"` // AI.11: Max tokens per minute for LLM route
 	AIWAFEnabled          bool              `json:"ai_waf_enabled,omitempty"`        // AI Self-Defending WAF (Enterprise)
+	CostPerToken          float64           `json:"cost_per_token,omitempty"`        // Cost per token for estimate calculations (OSS default/override)
 }
 
 type MetricsTracker struct {
@@ -395,10 +397,36 @@ func (h *GatewayHandler) SetAPIKeys(keys []APIKey) {
 	}
 }
 
+var (
+	gatewayRouteChangelog   []string
+	gatewayRouteChangelogMu sync.Mutex
+)
+
 func (h *GatewayHandler) UpdateRoutes(newRoutes []Route) {
 	h.routesMu.Lock()
-	defer h.routesMu.Unlock()
+	oldRoutes := h.routes
 	h.routes = newRoutes
+	h.routesMu.Unlock()
+
+	// Track changelog additions and removals
+	gatewayRouteChangelogMu.Lock()
+	oldMap := make(map[string]bool)
+	for _, r := range oldRoutes {
+		oldMap[r.Prefix] = true
+	}
+	newMap := make(map[string]bool)
+	for _, r := range newRoutes {
+		newMap[r.Prefix] = true
+		if !oldMap[r.Prefix] {
+			gatewayRouteChangelog = append(gatewayRouteChangelog, fmt.Sprintf("[%s] Added route prefix: %s", time.Now().Format(time.RFC3339), r.Prefix))
+		}
+	}
+	for _, r := range oldRoutes {
+		if !newMap[r.Prefix] {
+			gatewayRouteChangelog = append(gatewayRouteChangelog, fmt.Sprintf("[%s] Removed route prefix: %s", time.Now().Format(time.RFC3339), r.Prefix))
+		}
+	}
+	gatewayRouteChangelogMu.Unlock()
 
 	h.balancerMu.Lock()
 	defer h.balancerMu.Unlock()
@@ -700,6 +728,18 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusCreated)
 			return
 		}
+	}
+
+	if r.URL.Path == "/api/v1/gateway/changelog" {
+		gatewayRouteChangelogMu.Lock()
+		logs := make([]string, len(gatewayRouteChangelog))
+		copy(logs, gatewayRouteChangelog)
+		gatewayRouteChangelogMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{"changelog": logs})
+		return
 	}
 
 	if r.URL.Path == "/api/v1/admin/policy/reload" {
@@ -1147,7 +1187,7 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Read request body to apply AI checks
 	var reqBody []byte
-	if matchedRoute.PromptGuard || matchedRoute.PiiRedact || matchedRoute.SemanticCache || matchedRoute.SemanticRateLimit || matchedRoute.PromptABTest != nil || matchedRoute.ResponseQualityScore || matchedRoute.AIWAFEnabled {
+	if matchedRoute.PromptGuard || matchedRoute.PiiRedact || matchedRoute.SemanticCache || matchedRoute.SemanticRateLimit || matchedRoute.PromptABTest != nil || matchedRoute.ResponseQualityScore || matchedRoute.AIWAFEnabled || matchedRoute.CostPerToken > 0.0 {
 		reqBody, _ = io.ReadAll(r.Body)
 		r.Body.Close()
 
@@ -1160,6 +1200,12 @@ func (h *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		prompt = extractPrompt(reqBody)
+
+		// Calculate cost estimate if a prompt is detected
+		if prompt != "" {
+			estimatedCost := EstimateAICost(prompt, matchedRoute.CostPerToken)
+			w.Header().Set("X-Estimated-Cost", strconv.FormatFloat(estimatedCost, 'f', 6, 64))
+		}
 
 		// 1. AI Prompt Guard
 		if matchedRoute.PromptGuard && prompt != "" {
