@@ -212,7 +212,16 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if path == "/healthz" || path == "/readyz" || path == "/health" {
+		if path == "/healthz" || path == "/readyz" || path == "/health" ||
+			strings.HasPrefix(path, "/api/auth/login") ||
+			strings.HasPrefix(path, "/api/auth/register") ||
+			strings.HasPrefix(path, "/api/auth/jwks") ||
+			strings.HasPrefix(path, "/.well-known/jwks.json") ||
+			strings.HasPrefix(path, "/api/auth/reset-password/") ||
+			strings.HasPrefix(path, "/api/auth/magic-link/") ||
+			strings.HasPrefix(path, "/api/auth/passkey/login/") ||
+			strings.HasPrefix(path, "/oauth/token") ||
+			strings.HasPrefix(path, "/api/v1/oauth/token") {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -53,7 +53,7 @@ github.com/tetratelabs/wazero/internal/wasm/binary
 github.com/tetratelabs/wazero/internal/wasmdebug
 github.com/tetratelabs/wazero/internal/wasmruntime
 github.com/tetratelabs/wazero/sys
-# github.com/vyuvaraj/ServShared v1.0.2-0.20260714131806-8f86487bce70
+# github.com/vyuvaraj/ServShared v1.0.2-0.20260716090546-226c70693c88
 ## explicit; go 1.26.4
 github.com/vyuvaraj/ServShared
 github.com/vyuvaraj/ServShared/pkg/middleware
